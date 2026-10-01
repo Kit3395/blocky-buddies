@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Blocky Buddies</title>
+<link rel="stylesheet" href="css/style.css" />
+<script type="importmap">
+{ "imports": { "three": "./js/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="game-container"></div>
+
+<!-- Crosshair -->
+<div id="crosshair">+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="star-counter" title="Stars collected">⭐ <span id="star-count">0</span></div>
+  <button id="sound-btn" class="hud-btn" title="Sound on/off">🔊</button>
+  <button id="help-btn" class="hud-btn" title="How to play">❓</button>
+</div>
+
+<!-- Block color picker -->
+<div id="color-picker" class="hidden">
+  <div class="color-dot selected" data-color="0xff6b6b" style="background:#ff6b6b"></div>
+  <div class="color-dot" data-color="0xffd93d" style="background:#ffd93d"></div>
+  <div class="color-dot" data-color="0x6bcb77" style="background:#6bcb77"></div>
+  <div class="color-dot" data-color="0x4d96ff" style="background:#4d96ff"></div>
+  <div class="color-dot" data-color="0xb983ff" style="background:#b983ff"></div>
+  <div class="color-dot" data-color="0xff9f45" style="background:#ff9f45"></div>
+</div>
+
+<!-- Touch controls -->
+<div id="touch-controls" class="hidden">
+  <div id="joystick"><div id="joystick-knob"></div></div>
+  <div id="touch-buttons">
+    <button id="btn-jump" class="touch-btn">⬆️</button>
+    <button id="btn-place" class="touch-btn">🧱</button>
+    <button id="btn-dig" class="touch-btn">⛏️</button>
+  </div>
+</div>
+
+<!-- Keyboard hints (desktop only) -->
+<div id="key-hints" class="hidden">
+  <span><b>WASD</b> move</span><span><b>Space</b> jump</span><span><b>E</b> place block</span><span><b>Q</b> dig</span>
+</div>
+
+<!-- Start overlay -->
+<div id="start-overlay">
+  <div id="start-card">
+    <div id="game-logo">🧱</div>
+    <h1>Blocky Buddies</h1>
+    <p>Explore, build &amp; collect stars!</p>
+    <div id="buddy-picker">
+      <span>Pick your buddy:</span>
+      <div id="buddy-colors">
+        <div class="buddy-dot selected" data-color="0x4d96ff" style="background:#4d96ff"></div>
+        <div class="buddy-dot" data-color="0xff6b6b" style="background:#ff6b6b"></div>
+        <div class="buddy-dot" data-color="0x6bcb77" style="background:#6bcb77"></div>
+        <div class="buddy-dot" data-color="0xb983ff" style="background:#b983ff"></div>
+        <div class="buddy-dot" data-color="0xffd93d" style="background:#ffd93d"></div>
+      </div>
+    </div>
+    <button id="play-btn">▶ PLAY</button>
+  </div>
+</div>
+
+<!-- Help overlay -->
+<div id="help-overlay" class="hidden">
+  <div id="help-card">
+    <h2>How to play 🎮</h2>
+    <ul>
+      <li>🕹️ Move with <b>WASD / arrows</b> or the joystick</li>
+      <li>⬆️ <b>Space</b> to jump</li>
+      <li>🧱 <b>E</b> to place a block where you look</li>
+      <li>⛏️ <b>Q</b> to remove a block you built</li>
+      <li>⭐ Walk into stars to collect them!</li>
+      <li>🎨 Pick block colors at the bottom</li>
+    </ul>
+    <button id="help-close">Got it!</button>
+  </div>
+</div>
+
+<script type="module" src="js/game.js"></script>
+</body>
+</html>
