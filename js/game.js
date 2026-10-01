@@ -34,6 +34,53 @@ const clouds = [];
 
 const key = (x, y, z) => `${x},${y},${z}`;
 
+/* ---------------- Shared GPU resources ----------------
+   One geometry + cached materials shared by every box keeps draw setup
+   cheap and avoids leaking GPU buffers when blocks/particles are removed. */
+const unitBoxGeo = new THREE.BoxGeometry(1, 1, 1);
+const particleGeo = new THREE.BoxGeometry(0.14, 0.14, 0.14);
+const lambertCache = new Map();
+const basicCache = new Map();
+function lambertMat(color) {
+  let m = lambertCache.get(color);
+  if (!m) { m = new THREE.MeshLambertMaterial({ color }); lambertCache.set(color, m); }
+  return m;
+}
+function basicMat(color) {
+  let m = basicCache.get(color);
+  if (!m) { m = new THREE.MeshBasicMaterial({ color }); basicCache.set(color, m); }
+  return m;
+}
+// scratch vectors so the hot loop never allocates
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+let sunLight = null;
+let frameNo = 0;
+
+/* ---------------- Adaptive quality ----------------
+   Measures real fps and steps pixel-ratio / shadow resolution down
+   (or back up) so the game stays smooth on weak phones. */
+let qLevel = 0, qTimer = 0, qFrames = 0, qGoodStreak = 0;
+function applyQuality() {
+  const dpr = window.devicePixelRatio || 1;
+  renderer.setPixelRatio([Math.min(dpr, 2), Math.min(dpr, 1.5), 1][qLevel]);
+  if (sunLight) {
+    const sh = [1024, 512, 512][qLevel];
+    if (sunLight.shadow.mapSize.x !== sh) {
+      sunLight.shadow.mapSize.set(sh, sh);
+      if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
+    }
+  }
+}
+function adaptQuality(dt) {
+  qTimer += dt; qFrames++;
+  if (qTimer < 2.5) return;
+  const fps = qFrames / qTimer;
+  qTimer = 0; qFrames = 0;
+  if (fps < 28 && qLevel < 2) { qLevel++; applyQuality(); qGoodStreak = 0; }
+  else if (fps > 55 && qLevel > 0) { if (++qGoodStreak >= 2) { qLevel--; applyQuality(); qGoodStreak = 0; } }
+  else qGoodStreak = 0;
+}
+
 /* ---------------- Audio (tiny synth, no files) ---------------- */
 function ac() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -96,10 +143,8 @@ function groundYAt(x, z) {
 
 /* ---------------- World building ---------------- */
 function box(w, h, d, color, x = 0, y = 0, z = 0) {
-  const m = new THREE.Mesh(
-    new THREE.BoxGeometry(w, h, d),
-    new THREE.MeshLambertMaterial({ color })
-  );
+  const m = new THREE.Mesh(unitBoxGeo, lambertMat(color));
+  m.scale.set(w, h, d);
   m.position.set(x, y, z);
   m.castShadow = true; m.receiveShadow = true;
   return m;
@@ -118,6 +163,7 @@ function buildWorld() {
   sun.shadow.camera.left = -35; sun.shadow.camera.right = 35;
   sun.shadow.camera.top = 35; sun.shadow.camera.bottom = -35;
   scene.add(sun);
+  sunLight = sun;
 
   // Terrain (instanced boxes)
   const geo = new THREE.BoxGeometry(BLOCK, BLOCK, BLOCK);
@@ -165,43 +211,54 @@ function buildWorld() {
   rim.position.y = -1.4;
   scene.add(rim);
 
-  // Trees
+  // Trees — instanced (3 draw calls instead of ~42)
+  const treeSpots = [];
   for (let i = 0; i < 14; i++) {
     let x = 0, z = 0;
     do {
       x = Math.round((Math.random() * 2 - 1) * (WORLD_R - 5));
       z = Math.round((Math.random() * 2 - 1) * (WORLD_R - 5));
     } while (Math.hypot(x, z) < 4 || Math.hypot(x, z) > WORLD_R - 5);
-    const h = terrainH(x, z);
-    const tree = new THREE.Group();
-    tree.add(box(0.5, 1.6, 0.5, 0x8b5a2b, 0, h + 1.1, 0));
-    const leafC = [0x3e9e4f, 0x4caf50, 0x2f8f3e][i % 3];
-    tree.add(box(1.8, 1.4, 1.8, leafC, 0, h + 2.4, 0));
-    tree.add(box(1.2, 1.0, 1.2, leafC, 0, h + 3.2, 0));
-    tree.position.set(x, 0, z);
-    scene.add(tree);
+    treeSpots.push([x, z, terrainH(x, z), i]);
   }
+  const trunkI = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 1.6, 0.5), lambertMat(0x8b5a2b), treeSpots.length);
+  const leafI1 = new THREE.InstancedMesh(new THREE.BoxGeometry(1.8, 1.4, 1.8), lambertMat(0xffffff), treeSpots.length);
+  const leafI2 = new THREE.InstancedMesh(new THREE.BoxGeometry(1.2, 1.0, 1.2), lambertMat(0xffffff), treeSpots.length);
+  const leafCols = [0x3e9e4f, 0x4caf50, 0x2f8f3e].map(c => new THREE.Color(c));
+  treeSpots.forEach(([x, z, h, i], n) => {
+    dummy.position.set(x, h + 1.1, z); dummy.updateMatrix(); trunkI.setMatrixAt(n, dummy.matrix);
+    dummy.position.set(x, h + 2.4, z); dummy.updateMatrix();
+    leafI1.setMatrixAt(n, dummy.matrix); leafI1.setColorAt(n, leafCols[i % 3]);
+    dummy.position.set(x, h + 3.2, z); dummy.updateMatrix();
+    leafI2.setMatrixAt(n, dummy.matrix); leafI2.setColorAt(n, leafCols[i % 3]);
+  });
+  [trunkI, leafI1, leafI2].forEach(m => { m.castShadow = true; m.receiveShadow = true; scene.add(m); });
+  if (leafI1.instanceColor) leafI1.instanceColor.needsUpdate = true;
+  if (leafI2.instanceColor) leafI2.instanceColor.needsUpdate = true;
 
-  // Flowers
-  const flowerGeo = new THREE.BoxGeometry(0.22, 0.5, 0.22);
-  const flowerCols = [0xff6b9d, 0xffd93d, 0xffffff, 0xff9f45, 0xc084fc];
+  // Flowers — one instanced mesh
+  const flowerI = new THREE.InstancedMesh(new THREE.BoxGeometry(0.22, 0.5, 0.22), lambertMat(0xffffff), 40);
+  const flowerCols = [0xff6b9d, 0xffd93d, 0xffffff, 0xff9f45, 0xc084fc].map(c => new THREE.Color(c));
   for (let i = 0; i < 40; i++) {
     let x = 0, z = 0;
     do {
       x = Math.round((Math.random() * 2 - 1) * (WORLD_R - 3));
       z = Math.round((Math.random() * 2 - 1) * (WORLD_R - 3));
     } while (Math.hypot(x, z) < 3 || Math.hypot(x, z) > WORLD_R - 3);
-    const f = new THREE.Mesh(flowerGeo, new THREE.MeshLambertMaterial({ color: flowerCols[i % 5] }));
-    f.position.set(x + 0.3, terrainH(x, z) + 0.75, z - 0.2);
-    scene.add(f);
+    dummy.position.set(x + 0.3, terrainH(x, z) + 0.75, z - 0.2);
+    dummy.updateMatrix();
+    flowerI.setMatrixAt(i, dummy.matrix);
+    flowerI.setColorAt(i, flowerCols[i % 5]);
   }
+  if (flowerI.instanceColor) flowerI.instanceColor.needsUpdate = true;
+  scene.add(flowerI);
 
-  // Clouds (drifting white box clusters)
+  // Clouds (drifting white box clusters) — one shared material
+  const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.92 });
   for (let i = 0; i < 7; i++) {
     const cl = new THREE.Group();
-    const cm = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.92 });
     [[0, 0, 0, 4, 1.4, 2.4], [2.2, 0.3, 0.4, 2.6, 1.2, 2], [-2.2, 0.2, -0.3, 2.4, 1.1, 1.8]].forEach(([px, py, pz, w, h, d]) => {
-      const p = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), cm);
+      const p = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), cloudMat);
       p.position.set(px, py, pz); cl.add(p);
     });
     cl.position.set((Math.random() * 2 - 1) * 55, 16 + Math.random() * 7, (Math.random() * 2 - 1) * 55);
@@ -229,8 +286,8 @@ function buildAvatar(color) {
   const skin = 0xffd9b3;
   const head = box(0.62, 0.55, 0.55, skin, 0, 1.62, 0);
   // eyes (white + pupil boxes stuck on face)
-  const eyeW = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const eyeP = new THREE.MeshBasicMaterial({ color: 0x222222 });
+  const eyeW = basicMat(0xffffff);
+  const eyeP = basicMat(0x222222);
   [-0.14, 0.14].forEach(ex => {
     const w = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.16, 0.02), eyeW);
     w.position.set(ex, 1.66, 0.285); g.add(w);
@@ -238,8 +295,8 @@ function buildAvatar(color) {
     p.position.set(ex, 1.65, 0.30); g.add(p);
   });
   // smile
-  const smile = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.02),
-    new THREE.MeshBasicMaterial({ color: 0x8a4b2a }));
+  const smile = new THREE.Mesh(unitBoxGeo, basicMat(0x8a4b2a));
+  smile.scale.set(0.22, 0.05, 0.02);
   smile.position.set(0, 1.48, 0.285); g.add(smile);
 
   g.add(head);
@@ -261,19 +318,21 @@ function buildAvatar(color) {
 }
 
 /* ---------------- Stars ---------------- */
+let starGeo = null, starMat = null;
 function makeStar() {
   const g = new THREE.Group();
-  const shape = new THREE.Shape();
-  for (let i = 0; i < 10; i++) {
-    const r = i % 2 === 0 ? 0.42 : 0.19;
-    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
-    i === 0 ? shape.moveTo(Math.cos(a) * r, Math.sin(a) * r) : shape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  if (!starGeo) {
+    const shape = new THREE.Shape();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? 0.42 : 0.19;
+      const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+      i === 0 ? shape.moveTo(Math.cos(a) * r, Math.sin(a) * r) : shape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    shape.closePath();
+    starGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.18, bevelEnabled: false });
+    starMat = new THREE.MeshLambertMaterial({ color: 0xffd93d, emissive: 0x8a6d00 });
   }
-  shape.closePath();
-  const star = new THREE.Mesh(
-    new THREE.ExtrudeGeometry(shape, { depth: 0.18, bevelEnabled: false }),
-    new THREE.MeshLambertMaterial({ color: 0xffd93d, emissive: 0x8a6d00 })
-  );
+  const star = new THREE.Mesh(starGeo, starMat);
   star.position.z = -0.09;
   g.add(star);
   return g;
@@ -305,10 +364,12 @@ function collectStar(s) {
 }
 
 /* ---------------- Particles (confetti pops) ---------------- */
+const MAX_PARTICLES = 140;
 function burst(pos, color, n = 12) {
+  if (particles.length > MAX_PARTICLES) return;
+  const mat = basicMat(color);
   for (let i = 0; i < n; i++) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.14),
-      new THREE.MeshBasicMaterial({ color }));
+    const m = new THREE.Mesh(particleGeo, mat);
     m.position.copy(pos);
     m.userData.v = new THREE.Vector3((Math.random() - 0.5) * 5, Math.random() * 5 + 2, (Math.random() - 0.5) * 5);
     m.userData.life = 0.9;
@@ -317,14 +378,16 @@ function burst(pos, color, n = 12) {
 }
 
 /* ---------------- Bunnies (friendly wanderers) ---------------- */
-function makeBunny() {
+function makeBunny(furColor) {
   const g = new THREE.Group();
-  const white = 0xfdfdfd;
-  g.add(box(0.5, 0.42, 0.7, white, 0, 0.35, 0));
-  g.add(box(0.42, 0.4, 0.42, white, 0, 0.72, 0.28));
-  g.add(box(0.12, 0.5, 0.12, white, -0.12, 1.1, 0.28));
-  g.add(box(0.12, 0.5, 0.12, white, 0.12, 1.1, 0.28));
-  g.add(box(0.14, 0.14, 0.4, 0xffb3c7, 0, 0.35, -0.45)); // tail
+  const fur = lambertMat(furColor);
+  const pink = lambertMat(0xffb3c7);
+  const b1 = new THREE.Mesh(unitBoxGeo, fur); b1.scale.set(0.5, 0.42, 0.7); b1.position.set(0, 0.35, 0);
+  const b2 = new THREE.Mesh(unitBoxGeo, fur); b2.scale.set(0.42, 0.4, 0.42); b2.position.set(0, 0.72, 0.28);
+  const e1 = new THREE.Mesh(unitBoxGeo, fur); e1.scale.set(0.12, 0.5, 0.12); e1.position.set(-0.12, 1.1, 0.28);
+  const e2 = new THREE.Mesh(unitBoxGeo, fur); e2.scale.set(0.12, 0.5, 0.12); e2.position.set(0.12, 1.1, 0.28);
+  const tail = new THREE.Mesh(unitBoxGeo, pink); tail.scale.set(0.14, 0.14, 0.4); tail.position.set(0, 0.35, -0.45);
+  [b1, b2, e1, e2, tail].forEach(m => { m.castShadow = true; g.add(m); });
   g.userData = {
     dir: Math.random() * Math.PI * 2, timer: 0,
     hopT: 0, home: new THREE.Vector3()
@@ -334,12 +397,9 @@ function makeBunny() {
 function spawnBunnies() {
   const cols = [0xfdfdfd, 0xe8d8c8, 0xcfd8dc];
   for (let i = 0; i < 3; i++) {
-    const b = makeBunny();
+    const b = makeBunny(cols[i]);
     const x = (Math.random() * 2 - 1) * 10, z = (Math.random() * 2 - 1) * 10;
     b.position.set(x, terrainH(Math.round(x), Math.round(z)) + 0.5, z);
-    b.children.forEach(c => { if (c.material.color) c.material = c.material.clone(); });
-    b.children[0].material.color.setHex(cols[i]);
-    b.children[1].material.color.setHex(cols[i]);
     scene.add(b); bunnies.push(b);
   }
 }
@@ -361,9 +421,10 @@ function getTarget() {
   if (!avatar) return null;
   // Aim from the buddy's head along the camera's view direction, so blocks
   // always land in front of the buddy where the kid is looking.
-  const origin = avatar.position.clone().add(new THREE.Vector3(0, 1.5, 0));
-  const dir = camera.getWorldDirection(new THREE.Vector3());
-  raycaster.set(origin, dir);
+  // (scratch vectors: this runs every frame, so no allocations here)
+  _v1.copy(avatar.position); _v1.y += 1.5;
+  camera.getWorldDirection(_v2);
+  raycaster.set(_v1, _v2);
   raycaster.far = 12;
   const meshes = [...placedBlocks.values()];
   if (window.__terrainMesh) meshes.push(window.__terrainMesh);
@@ -414,8 +475,7 @@ function digBlock() {
   const m = placedBlocks.get(k);
   burst(m.position.clone(), m.material.color.getHex(), 8);
   scene.remove(m);
-  m.geometry.dispose(); m.material.dispose();
-  placedBlocks.delete(k);
+  placedBlocks.delete(k); // geometry/material are shared — never dispose
   getHighlightMesh().visible = false;
   sfx.dig();
 }
@@ -500,6 +560,7 @@ function setupControls() {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    applyQuality(); // re-apply current adaptive pixel-ratio level
   });
 }
 
@@ -515,6 +576,8 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
+  frameNo++;
+  adaptQuality(dt);
 
   if (started) {
     // --- movement input ---
@@ -570,10 +633,13 @@ function animate() {
     const camDist = 7.5, camH = 4.6;
     const cx = avatar.position.x - Math.sin(yaw) * camDist;
     const cz = avatar.position.z - Math.cos(yaw) * camDist;
-    camera.position.lerp(new THREE.Vector3(cx, avatar.position.y + camH, cz), 1 - Math.pow(0.001, dt));
+    _v1.set(cx, avatar.position.y + camH, cz);
+    camera.position.lerp(_v1, 1 - Math.pow(0.001, dt));
     camera.lookAt(avatar.position.x, avatar.position.y + 1.4, avatar.position.z);
 
-    updateHighlight();
+    // Aim highlight is the most expensive per-frame job (ray vs ~1300
+    // terrain instances), so refresh it every 3rd frame — invisible to kids.
+    if (frameNo % 3 === 0) updateHighlight();
 
     // --- stars ---
     for (const s of stars) {
@@ -594,7 +660,8 @@ function animate() {
       }
       s.rotation.y += dt * 2.2;
       s.position.y = u.baseY + Math.sin(t * 2.4 + u.phase) * 0.25;
-      if (s.position.distanceTo(avatar.position.clone().add(new THREE.Vector3(0, 1, 0))) < 1.4) collectStar(s);
+      _v3.copy(avatar.position); _v3.y += 1;
+      if (s.position.distanceTo(_v3) < 1.4) collectStar(s);
     }
 
     // --- bunnies hop around ---
@@ -637,11 +704,14 @@ function init() {
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 300);
   camera.position.set(0, 6, 12);
-  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setSize(innerWidth, innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // phones: no 3x rendering
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   document.getElementById('game-container').appendChild(renderer.domElement);
+  // long-press context menu would interrupt touch play
+  renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
   clock = new THREE.Clock();
 
   buildWorld();
@@ -665,6 +735,12 @@ function init() {
 
   setupControls();
   animate();
+
+  // Don't drain battery or play music to an empty room when tab is hidden.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMusic();
+    else if (started && soundOn) startMusic();
+  });
 }
 
 function startGame() {
